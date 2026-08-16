@@ -7,44 +7,89 @@
 import gzip
 import os
 import struct
-from io import BufferedReader
+import zstandard
+from io import BufferedReader, BytesIO
 from typing import BinaryIO
 from pathlib import Path
 
 from PIL import Image, ImageOps
 
+import logging
 
 def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
     REND: bytes = b"REND"
     TEST: bytes = b"TEST"
     ENDB: bytes = b"ENDB"
 
+    # Zstandard frame magic.
+    ZSTD_MAGIC: bytes = b"\x28\xb5\x2f\xfd"
+
     blendfile: BinaryIO | None = None
     raw_file: BinaryIO | None = None
 
     try:
         # --------------------------------------------------------------
-        # Open file.
+        # Open file and detect compression.
         # --------------------------------------------------------------
         raw_file: BufferedReader = open(path, "rb")
 
-        # Legacy header = 12 bytes
-        # Blender 5+   = 17 bytes
-        head: bytes = raw_file.read(17)
+        magic: bytes = raw_file.read(4)
 
         # --------------------------------------------------------------
-        # GZIP-compressed blend file.
+        # Zstandard-compressed Blender file.
+        #
+        # Blender's "Compress" option uses Zstandard compression.
+        #
+        # Decompress the entire file into BytesIO so that the rest of
+        # the parser has normal seekable-file behaviour.
         # --------------------------------------------------------------
-        if head[:2] == b"\x1f\x8b":
-            logging.info("GZIP blend file")
+        if magic == ZSTD_MAGIC:
+            logging.info("Zstandard-compressed blend file")
+
+            raw_file.seek(0)
+
+            dctx = zstandard.ZstdDecompressor()
+
+            with dctx.stream_reader(raw_file) as reader:
+                decompressed: bytes = reader.read()
+
+            blendfile = BytesIO(decompressed)
 
             raw_file.close()
             raw_file = None
 
-            blendfile = gzip.open(path, "rb")
-            head = blendfile.read(17)
+        # --------------------------------------------------------------
+        # GZIP-compressed blend file.
+        # --------------------------------------------------------------
+        elif magic[:2] == b"\x1f\x8b":
+            logging.info("GZIP-compressed blend file")
+
+            raw_file.seek(0)
+
+            with gzip.GzipFile(fileobj=raw_file, mode="rb") as reader:
+                decompressed = reader.read()
+
+            blendfile = BytesIO(decompressed)
+
+            raw_file.close()
+            raw_file = None
+
+        # --------------------------------------------------------------
+        # Normal uncompressed blend file.
+        # --------------------------------------------------------------
         else:
+            logging.info("Uncompressed blend file")
+
+            raw_file.seek(0)
             blendfile = raw_file
+
+        # --------------------------------------------------------------
+        # Read Blender file header.
+        #
+        # Legacy header = 12 bytes
+        # Blender 5+   = 17 bytes
+        # --------------------------------------------------------------
+        head: bytes = blendfile.read(17)
 
         logging.info("Head: %r", head)
 
@@ -72,7 +117,7 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         is_blender_5: bool = (
             len(head) >= 17
             and head[7:9].isdigit()
-            and head[9:13] == b"-01v" #format
+            and head[9:13] == b"-01v"
         )
 
         if is_blender_5:
@@ -111,6 +156,7 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
             sizeof_bhead: int = 32
             large_bhead: bool = True
 
+            # Blender 5+ is little endian.
             int_endian_pair: str = "<ii"
 
         # --------------------------------------------------------------
@@ -344,6 +390,13 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
 
         return image_buffer, x, y
 
+    except (OSError, zstandard.ZstdError) as exc:
+        logging.exception(
+            "Unable to read/decompress blend file: %s",
+            exc,
+        )
+        return None, 0, 0
+
     finally:
         if blendfile is not None:
             blendfile.close()
@@ -364,6 +417,6 @@ def blend_thumb(file_in: Path | str) -> Image.Image | None:
     image = ImageOps.flip(image)
     # Upscale Image so it looks better at higher resolutions.
     width, height = image.size
-    ratio = height/width
-    image = image.resize((512, round(512*ratio)),Image.BICUBIC)
+    ratio = height / width
+    image = image.resize((512, round(512 * ratio)), Image.BICUBIC)
     return image
