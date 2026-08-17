@@ -43,7 +43,6 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         # the parser has normal seekable-file behaviour.
         # --------------------------------------------------------------
         if magic == ZSTD_MAGIC:
-
             raw_file.seek(0)
 
             dctx = zstandard.ZstdDecompressor()
@@ -60,7 +59,6 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         # GZIP-compressed blend file.
         # --------------------------------------------------------------
         elif magic[:2] == b"\x1f\x8b":
-
             raw_file.seek(0)
 
             with gzip.GzipFile(fileobj=raw_file, mode="rb") as reader:
@@ -105,11 +103,7 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         #   12    = 'v'
         #   13-16 = Blender version
         # --------------------------------------------------------------
-        is_blender_5: bool = (
-            len(head) >= 17
-            and head[7:9].isdigit()
-            and head[9:13] == b"-01v"
-        )
+        is_blender_5: bool = len(head) >= 17 and head[7:9].isdigit() and head[9:13] == b"-01v"
 
         if is_blender_5:
             try:
@@ -117,7 +111,6 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
                 version: int = int(head[13:17])
             except ValueError:
                 return None, 0, 0
-
 
             if header_size < 17:
                 return None, 0, 0
