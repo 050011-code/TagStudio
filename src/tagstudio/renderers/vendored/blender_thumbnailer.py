@@ -7,14 +7,13 @@
 import gzip
 import os
 import struct
-import zstandard
-from io import BufferedReader, BytesIO
-from typing import BinaryIO
+from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO
 
+import zstandard
 from PIL import Image, ImageOps
 
-import logging
 
 def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
     REND: bytes = b"REND"
@@ -24,14 +23,14 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
     # Zstandard frame magic.
     ZSTD_MAGIC: bytes = b"\x28\xb5\x2f\xfd"
 
-    blendfile: BinaryIO | None = None
+    blendfile: BinaryIO | gzip.GzipFile | None = None
     raw_file: BinaryIO | None = None
 
     try:
         # --------------------------------------------------------------
         # Open file and detect compression.
         # --------------------------------------------------------------
-        raw_file: BufferedReader = open(path, "rb")
+        raw_file = open(path, "rb")
 
         magic: bytes = raw_file.read(4)
 
@@ -44,7 +43,6 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         # the parser has normal seekable-file behaviour.
         # --------------------------------------------------------------
         if magic == ZSTD_MAGIC:
-            logging.info("Zstandard-compressed blend file")
 
             raw_file.seek(0)
 
@@ -62,7 +60,6 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         # GZIP-compressed blend file.
         # --------------------------------------------------------------
         elif magic[:2] == b"\x1f\x8b":
-            logging.info("GZIP-compressed blend file")
 
             raw_file.seek(0)
 
@@ -78,8 +75,6 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         # Normal uncompressed blend file.
         # --------------------------------------------------------------
         else:
-            logging.info("Uncompressed blend file")
-
             raw_file.seek(0)
             blendfile = raw_file
 
@@ -91,14 +86,10 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         # --------------------------------------------------------------
         head: bytes = blendfile.read(17)
 
-        logging.info("Head: %r", head)
-
         if not head.startswith(b"BLENDER"):
-            logging.info("Header doesn't start with BLENDER")
             return None, 0, 0
 
         if len(head) < 12:
-            logging.info("Header is too short")
             return None, 0, 0
 
         # --------------------------------------------------------------
@@ -125,17 +116,10 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
                 header_size: int = int(head[7:9])
                 version: int = int(head[13:17])
             except ValueError:
-                logging.info("Invalid Blender 5 header")
                 return None, 0, 0
 
-            logging.info(
-                "Blender 5+ header: size=%d version=%d",
-                header_size,
-                version,
-            )
 
             if header_size < 17:
-                logging.info("Invalid Blender 5 header size")
                 return None, 0, 0
 
             # We have already consumed 17 bytes.
@@ -157,6 +141,7 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
             large_bhead: bool = True
 
             # Blender 5+ is little endian.
+            int_endian: str = "<"
             int_endian_pair: str = "<ii"
 
         # --------------------------------------------------------------
@@ -181,19 +166,10 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
             try:
                 version: int = int(head[9:12])
             except ValueError:
-                logging.info("Invalid legacy Blender version")
                 return None, 0, 0
-
-            logging.info(
-                "Legacy Blender header: version=%d 64bit=%s big_endian=%s",
-                version,
-                is_64_bit,
-                is_big_endian,
-            )
 
             # Blender pre-2.5 had no thumbnails.
             if version < 250:
-                logging.info("Blender version has no thumbnails")
                 return None, 0, 0
 
             sizeof_bhead: int = 24 if is_64_bit else 20
@@ -209,30 +185,13 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         # Walk the BHeads until we find TEST.
         # --------------------------------------------------------------
         while True:
-            block_offset: int = blendfile.tell()
-
             bhead: bytes = blendfile.read(sizeof_bhead)
-
-            logging.debug(
-                "BHead at offset %d: read %d/%d bytes: %r",
-                block_offset,
-                len(bhead),
-                sizeof_bhead,
-                bhead[:4],
-            )
 
             # ENDB is a special partial BHead.
             if len(bhead) >= 4 and bhead[:4] == ENDB:
-                logging.info("Reached ENDB before TEST")
                 return None, 0, 0
 
             if len(bhead) < sizeof_bhead:
-                logging.info(
-                    "Truncated BHead at offset %d: got %d bytes, expected %d",
-                    block_offset,
-                    len(bhead),
-                    sizeof_bhead,
-                )
                 return None, 0, 0
 
             code: bytes = bhead[:4]
@@ -248,27 +207,6 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
                     bhead,
                     16,
                 )[0]
-
-                sdna: int = struct.unpack_from(
-                    "<I",
-                    bhead,
-                    4,
-                )[0]
-
-                count: int = struct.unpack_from(
-                    "<Q",
-                    bhead,
-                    24,
-                )[0]
-
-                logging.debug(
-                    "Blender 5 BHead: offset=%d code=%r size=%d sdna=%d count=%d",
-                    block_offset,
-                    code,
-                    length,
-                    sdna,
-                    count,
-                )
 
             # ----------------------------------------------------------
             # Legacy Blender
@@ -286,26 +224,13 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
                     4,
                 )[0]
 
-                logging.debug(
-                    "Legacy BHead: offset=%d code=%r size=%d",
-                    block_offset,
-                    code,
-                    length,
-                )
-
             # ----------------------------------------------------------
             # REND contains render information before TEST.
             # Skip its payload.
             # ----------------------------------------------------------
             if code == REND:
                 if length < 0:
-                    logging.info("Invalid REND length: %d", length)
                     return None, 0, 0
-
-                logging.debug(
-                    "Skipping REND payload: %d bytes",
-                    length,
-                )
 
                 blendfile.seek(length, os.SEEK_CUR)
                 continue
@@ -317,11 +242,6 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         # We need the TEST block.
         # --------------------------------------------------------------
         if code != TEST:
-            logging.info(
-                "Expected TEST block, found %r at offset %d",
-                code,
-                block_offset,
-            )
             return None, 0, 0
 
         # --------------------------------------------------------------
@@ -334,7 +254,6 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         dimensions: bytes = blendfile.read(8)
 
         if len(dimensions) != 8:
-            logging.info("TEST block is missing dimensions")
             return None, 0, 0
 
         try:
@@ -345,34 +264,17 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
                 dimensions,
             )
         except struct.error:
-            logging.info("Unable to unpack thumbnail dimensions")
             return None, 0, 0
-
-        logging.info(
-            "Thumbnail dimensions: %dx%d",
-            x,
-            y,
-        )
 
         # The TEST block length includes the two 32-bit dimensions.
         image_length: int = length - 8
 
         if x <= 0 or y <= 0:
-            logging.info(
-                "Invalid thumbnail dimensions: %dx%d",
-                x,
-                y,
-            )
             return None, 0, 0
 
         expected_length: int = x * y * 4
 
         if image_length != expected_length:
-            logging.info(
-                "Thumbnail size mismatch: block=%d expected=%d",
-                image_length,
-                expected_length,
-            )
             return None, 0, 0
 
         # --------------------------------------------------------------
@@ -381,20 +283,11 @@ def blend_extract_thumb(path: Path | str) -> tuple[bytes | None, int, int]:
         image_buffer: bytes = blendfile.read(image_length)
 
         if len(image_buffer) != image_length:
-            logging.info(
-                "Thumbnail data truncated: got %d expected %d",
-                len(image_buffer),
-                image_length,
-            )
             return None, 0, 0
 
         return image_buffer, x, y
 
-    except (OSError, zstandard.ZstdError) as exc:
-        logging.exception(
-            "Unable to read/decompress blend file: %s",
-            exc,
-        )
+    except (OSError, zstandard.ZstdError):
         return None, 0, 0
 
     finally:
@@ -418,5 +311,5 @@ def blend_thumb(file_in: Path | str) -> Image.Image | None:
     # Upscale Image so it looks better at higher resolutions.
     width, height = image.size
     ratio = height / width
-    image = image.resize((512, round(512 * ratio)), Image.BICUBIC)
+    image = image.resize((512, round(512 * ratio)), Image.Resampling.BICUBIC)
     return image
